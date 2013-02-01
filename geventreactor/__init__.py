@@ -24,13 +24,12 @@
 
 
 import sys
-import os
+import traceback
 from bisect import insort
 
 import gevent
 from gevent import Greenlet, GreenletExit, socket
 from gevent.pool import Group
-from gevent.queue import Queue
 from gevent.event import Event, AsyncResult
 
 from twisted.python import log, failure, reflect, util
