@@ -367,7 +367,7 @@ class GeventReactor(posixbase.PosixReactorBase):
 					delay = 300
 				try:
 					self._wait = 1
-					gevent.sleep(max(0,delay))
+					gevent.sleep(delay if delay > 0 else 0)
 				except Reschedule:
 					continue
 				finally:
