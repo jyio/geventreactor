@@ -456,7 +456,7 @@ class GeventReactor(posixbase.PosixReactorBase):
 	seconds = staticmethod(runtimeSeconds)
 
 	def callLater(self,delay,func,*args,**kw):
-		func = DelayedCall(self,self.seconds()+delay,func,args,kw,seconds=self.seconds)
+		c = DelayedCall(self,self.seconds()+delay,func,args,kw,seconds=self.seconds)
 		insort(self._callqueue,c)
 		self.reschedule()
 		return c
