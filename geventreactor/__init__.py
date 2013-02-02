@@ -222,7 +222,7 @@ class DelayedCall(object):
 			raise error.AlreadyCalled
 		else:
 			self.time = self.seconds()+secondsFromNow
-			self.caller.callLater(self)
+			self.caller.scheduleDelayedCall(self)
 
 	def delay(self,secondsFromLater):
 		if self.cancelled:
@@ -231,7 +231,7 @@ class DelayedCall(object):
 			raise error.AlreadyCalled
 		else:
 			self.time += secondsFromLater
-			self.caller.callLater(self)
+			self.caller.scheduleDelayedCall(self)
 
 	def active(self):
 		return not (self.cancelled or self.called)
@@ -511,6 +511,15 @@ class GeventReactor(posixbase.PosixReactorBase):
 	def reschedule(self):
 		if self._wait and self._callqueue and self._callqueue[0].time < self._wake:
 			gevent.kill(self.greenlet,Reschedule)
+
+	def scheduleDelayedCall(self,c):
+		try:
+			self._callqueue.remove(c)
+		except ValueError:
+			pass
+		insort(self._callqueue,c)
+		self.reschedule()
+		return c
 
 def install():
 	"""Configure the twisted mainloop to be run using geventreactor."""
