@@ -393,7 +393,8 @@ class GeventReactor(posixbase.PosixReactorBase):
 		try:
 			self._reads[selectable].resume()
 		except KeyError:
-			self._reads[selectable] = g = Stream.spawn(self,selectable,'doRead')
+			self._reads[selectable] = g = Stream(self,selectable,'doRead')
+			g.start()
 			self.addToGreenletPool(g)
 
 	def addWriter(self,selectable):
@@ -401,7 +402,8 @@ class GeventReactor(posixbase.PosixReactorBase):
 		try:
 			self._writes[selectable].resume()
 		except KeyError:
-			self._writes[selectable] = g = Stream.spawn(self,selectable,'doWrite')
+			self._writes[selectable] = g = Stream(self,selectable,'doWrite')
+			g.start()
 			self.addToGreenletPool(g)
 
 	def removeReader(self,selectable):
