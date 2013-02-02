@@ -21,12 +21,9 @@
 - `GeventReactor` is the gevent-powered reactor. Simply install it before you import `twisted.internet.reactor`:
   `import geventreactor; geventreactor.install()`
 - `GeventResolver` is the gevent-powered DNS resolver. It is automatically installed in the `GeventReactor`, but can be used by itself à la `ThreadedResolver`
-- `deferToGreenletPool` runs a function in a gevent pool, returning a `Deferred`
-- `deferToGreenlet` runs a function in the default pool of `GeventReactor`, returning a `Deferred`
-- `callMultipleInGreenlet` runs multiple functions in sequence, all in a greenlet
+- `GeventThreadPool` manages greenlets in a group but exposes a Twisted-style thread pool interface. It helps `GeventReactor` work seamlessly with the functions in `twisted.internet.threads`.
 - `waitForGreenlet` adapts a greenlet to a `Deferred` usable in Twisted methods
 - `waitForDeferred` waits until a `Deferred` is fulfilled, blocking for a result or exception
-- `blockingCallFromGreenlet` schedules a function to be run by the Twisted reactor, blocking for a result or exception (must not be run in the Twisted reactor greenlet)
 
 
 ## Example Code
@@ -142,9 +139,9 @@ reactor.run()
 
 Life would be perfect without these, right?
 
-- You can use blocking code in many places, but not **everywhere**. Each protocol instance has two greenlets dedicated to input and output, so feel free to block in `doRead` (i.e. `dataReceived`, `lineReceived`, ...), and `doRead` won't be called multiple times simultaneously unless you make it do so (i.e. spawn a greenlet and return). Anything that runs in the reactor's greenlet (i.e. `callFromThread`, `callFromGreenlet`, `callLater`, ...) must not block. Of course, it is okay to spawn new greenlets when blocking is not advisable. So far, I know the following additional methods should not block:
+- You can use blocking code in many places, but not **everywhere**. Each protocol instance has two greenlets dedicated to input and output, so feel free to block in `doRead` (i.e. `dataReceived`, `lineReceived`, ...), and `doRead` won't be called multiple times simultaneously unless you make it do so (i.e. spawn a greenlet and return). Anything that runs in the reactor's greenlet (i.e. `callFromThread`, `callFromGreenlet`, `callLater`, ...) must not block. Deferred callbacks/errbacks should also not block, because they may be called from the reactor's greenlet. Of course, it is okay to spawn new greenlets when blocking is not advisable. So far, I know the following additional methods should not block:
   - `Protocol.connectionMade`
-- While geventreactor matches or exceeds selectreactor in terms of throughput, it does not perform as well in the number of connections or Web requests processed per second. Current development is focused on improving such performance as measured by jcalderone's [twisted-benchmarks]; feel free to pitch in.
+- While a reasonable attempt is made for performance, the main concern is compatibility with existing Twisted-oriented code. geventreactor is similar to selectreactor in terms of throughput, but it does not perform as well in the number of connections or Web requests processed per second. Please consider porting performance-critical parts of the project to gevent. Currently, compatibility and performance are tested using jcalderone's [twisted-benchmarks].
 
 [twisted-benchmarks]: https://code.launchpad.net/~exarkun/+junk/twisted-benchmarks "twisted-benchmarks"
 

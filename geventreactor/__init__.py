@@ -37,7 +37,7 @@ from twisted.python import log, failure, reflect, util
 from twisted.python.runtime import seconds as runtimeSeconds
 from twisted.internet import defer, error, posixbase
 from twisted.internet.base import IDelayedCall, ThreadedResolver
-from twisted.internet.threads import _runMultiple
+from twisted.internet.threads import deferToThreadPool, deferToThread, callMultipleInThread, blockingCallFromThread
 from twisted.persisted import styles
 
 from zope.interface import Interface, implements
@@ -51,6 +51,7 @@ __all__ = [
 	'waitForDeferred',
 	'blockingCallFromGreenlet',
 	'IReactorGreenlets',
+	'GeventThreadPool',
 	'GeventResolver',
 	'GeventReactor',
 	'install'
@@ -62,31 +63,11 @@ _NO_FILENO = error.ConnectionFdescWentAway('Handler has no fileno method')
 _NO_FILEDESC = error.ConnectionFdescWentAway('Filedescriptor went away')
 
 
-# These (except for waitFor*) resemble the threading helpers from twisted.internet.threads
-
-
-def deferToGreenletPool(reactor,pool,func,*args,**kwargs):
-	"""Call function using a greenlet from the given pool and return the result as a Deferred"""
-	d = defer.Deferred()
-	def task():
-		try:
-			reactor.callFromGreenlet(d.callback,func(*args,**kwargs))
-		except:
-			reactor.callFromGreenlet(d.errback,failure.Failure())
-	pool.add(Greenlet.spawn_later(0,task))
-	return d
-
-
-def deferToGreenlet(*args,**kwargs):
-	"""Call function using a greenlet and return the result as a Deferred"""
-	from twisted.internet import reactor
-	return deferToGreenletPool(reactor,reactor.getGreenletPool(),*args,**kwargs)
-
-
-def callMultipleInGreenlet(tupleList):
-	"""Call a list of functions in the same thread"""
-	from twisted.internet import reactor
-	reactor.callInGreenlet(_runMultiple,tupleList)
+# Mirrored from twisted.internet.threads for backwards-compatibility
+deferToGreenletPool = deferToThreadPool
+deferToGreenlet = deferToThread
+callMultipleInGreenlet = callMultipleInThread
+blockingCallFromGreenlet = blockingCallFromThread
 
 
 def waitForGreenlet(g):
@@ -119,22 +100,6 @@ def waitForDeferred(d,result=None):
 		ex.raiseException()
 
 
-def blockingCallFromGreenlet(reactor,func,*args,**kwargs):
-	"""Call function in reactor greenlet and block current greenlet waiting for the result"""
-	result = AsyncResult()
-	def task():
-		try:
-			result.set(func(*args,**kwargs))
-		except Exception,ex:
-			result.set_exception(ex)
-	reactor.callFromGreenlet(task)
-	value = result.get()
-	if isinstance(value,defer.Deferred):
-		return waitForDeferred(value)
-	else:
-		return value
-
-
 class IReactorGreenlets(Interface):
 	"""Interface for reactor supporting greenlets"""
 
@@ -150,13 +115,55 @@ class IReactorGreenlets(Interface):
 	def suggestGreenletPoolSize(self,size):
 		pass
 
-	def addToGreenletPool(self,g):
-		pass
-
 
 class Reschedule(Exception):
 	"""Event for IReactorTime"""
 	pass
+
+
+class GeventThreadPool(Group):
+	"""This class allows Twisted to work with a greenlet pool"""
+
+	def __init__(self,*args,**kwargs):
+		Group.__init__(self,*args,**kwargs)
+		self.open = True
+
+	def start(self,greenlet=None):
+		"""Start the greenlet pool or add a greenlet to the pool."""
+		if greenlet is not None:
+			return Group.start(self,greenlet)
+
+	def startAWorker(self):
+		pass
+
+	def stopAWorker(self):
+		pass
+
+	def callInThread(self,func,*args,**kwargs):
+		"""Call a callable object in a separate greenlet."""
+		if self.open:
+			self.add(Greenlet.spawn_later(0,func,*args,**kwargs))
+
+	def callInThreadWithCallback(self,onResult,func,*args,**kwargs):
+		"""Call a callable object in a separate greenlet and call onResult with the return value."""
+		if self.open:
+			def task():
+				try:
+					res = func(*args,**kwargs)
+				except:
+					onResult(False,failure.Failure())
+				else:
+					onResult(True,res)
+			self.add(Greenlet.spawn_later(0,task,*args,**kwargs))
+
+	def stop(self):
+		"""Stop greenlet pool."""
+		self.open = False
+		self.kill(block=False)
+		self.join()
+
+	def adjustPoolsize(self,minthreads=None,maxthreads=None):
+		pass
 
 
 class GeventResolver(ThreadedResolver):
@@ -168,13 +175,14 @@ class GeventResolver(ThreadedResolver):
 		else:
 			timeoutDelay = 60
 		userDeferred = defer.Deferred()
-		lookupDeferred = deferToGreenletPool(
-			self.reactor,self.reactor.getGreenletPool(),socket.gethostbyname,name)
+		lookupDeferred = deferToThreadPool(
+			self.reactor,self.reactor.getThreadPool(),socket.gethostbyname,name)
 		cancelCall = self.reactor.callLater(
 			timeoutDelay,self._cleanup,name,lookupDeferred)
 		self._runningQueries[lookupDeferred] = (userDeferred,cancelCall)
 		lookupDeferred.addBoth(self._checkTimeout,name,lookupDeferred)
 		return userDeferred
+
 
 class DelayedCall(object):
 	"""Delayed call proxy for IReactorTime"""
@@ -272,6 +280,7 @@ class DelayedCall(object):
 		L.append('>')
 		return ''.join(L)
 
+
 class Stream(Greenlet,styles.Ephemeral):
 
 	def __init__(self,reactor,selectable,method):
@@ -324,25 +333,22 @@ class Stream(Greenlet,styles.Ephemeral):
 		else:
 			self.reactor.discardWriter(selectable)
 
+
 class GeventReactor(posixbase.PosixReactorBase):
 	"""Implement gevent-powered reactor based on PosixReactorBase."""
 
 	implements(IReactorGreenlets)
 
 	def __init__(self,*args,**kwargs):
+		self.resolver = None
 		self.greenlet = None
-		self.greenletpool = Group()
+		self.threadpool = None
 		self._reads = {}
 		self._writes = {}
 		self._callqueue = []
 		self._wake = 0
 		self._wait = 0
-		self.resolver = GeventResolver(self)
-		self.addToGreenletPool = self.greenletpool.add
 		posixbase.PosixReactorBase.__init__(self,*args,**kwargs)
-		self._initThreads()
-		self._initThreadPool()
-		self._initGreenletPool()
 
 	def mainLoop(self):
 		"""This main loop yields to gevent until the end, handling function calls along the way."""
@@ -395,7 +401,7 @@ class GeventReactor(posixbase.PosixReactorBase):
 		except KeyError:
 			self._reads[selectable] = g = Stream(self,selectable,'doRead')
 			g.start()
-			self.addToGreenletPool(g)
+			self.threadpool.add(g)
 
 	def addWriter(self,selectable):
 		"""Add a FileDescriptor for notification of data available to write."""
@@ -404,7 +410,7 @@ class GeventReactor(posixbase.PosixReactorBase):
 		except KeyError:
 			self._writes[selectable] = g = Stream(self,selectable,'doWrite')
 			g.start()
-			self.addToGreenletPool(g)
+			self.threadpool.add(g)
 
 	def removeReader(self,selectable):
 		"""Remove a FileDescriptor for notification of data available to read."""
@@ -469,38 +475,44 @@ class GeventReactor(posixbase.PosixReactorBase):
 		self._callqueue.remove(callID)
 		self.reschedule()
 
-	# IReactorGreenlets
+	# IReactorThreads
 
-	def _initGreenletPool(self):
-		self.greenletpoolShutdownID = self.addSystemEventTrigger('during','shutdown',self._stopGreenletPool)
+	def _initThreads(self):
+		self.usingGreenlets = self.usingThreads = True
+		if self.threadpool is None:
+			self.resolver = GeventResolver(self)
+			self.threadpool = GeventThreadPool()
+			self.threadpoolShutdownID = self.addSystemEventTrigger('during','shutdown',self._stopThreadPool)
 
-	def _stopGreenletPool(self):
-		self.greenletpool.kill()
+	def _stopThreadPool(self):
+		self.threadpoolShutdownID = None
+		if self.threadpool is not None:
+			self.threadpool.stop()
+			self.threadpool = None
 
-	def getGreenletPool(self):
-		return self.greenletpool
+	def getThreadPool(self):
+		return self.threadpool
 
-	def callInGreenlet(self,*args,**kwargs):
-		self.addToGreenletPool(Greenlet.spawn_later(0,*args,**kwargs))
+	def callInThread(self,*args,**kwargs):
+		self.threadpool.callInThread(*args,**kwargs)
 
-	def callFromGreenlet(self,func,*args,**kw):
+	def callFromThread(self,func,*args,**kw):
 		c = DelayedCall(self,self.seconds(),func,args,kw,seconds=self.seconds)
 		insort(self._callqueue,c)
 		self.reschedule()
 		return c
 
-	def suggestGreenletPoolSize(self,size):
+	def suggestThreadPoolSize(self,*args,**kwargs):
 		pass
 
-	def addToGreenletPool(self,g):
-		self.greenletpool.add(g)
+	# IReactorGreenlets, mirrored from IReactorThreads for backwards-compatibility
 
-	# IReactorThreads
-
-	def _initThreads(self):	# do not initialize ThreadedResolver, since we are using GeventResolver
-		self.usingThreads = True
-
-	callFromThread = callFromGreenlet
+	_initGreenlets = _initThreads
+	_stopGreenletPool = _stopThreadPool
+	getGreenletPool = getThreadPool
+	callInGreenlet = callInThread
+	callFromGreenlet = callFromThread
+	suggestGreenletPoolSize = suggestThreadPoolSize
 
 	# IReactorCore
 
@@ -520,6 +532,7 @@ class GeventReactor(posixbase.PosixReactorBase):
 		insort(self._callqueue,c)
 		self.reschedule()
 		return c
+
 
 def install():
 	"""Configure the twisted mainloop to be run using geventreactor."""
